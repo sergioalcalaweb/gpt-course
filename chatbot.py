@@ -41,45 +41,6 @@ int_to_string = { i:ch for i,ch in enumerate(chars) }
 encode = lambda s: [string_to_int[c] for c in s]
 decode = lambda l: ''.join([int_to_string[i] for i in l])
 
-# memory map for using small snippets of text from a single file of any size
-def get_random_chunk(split):
-    with open("arte_de_amar.txt", 'r', encoding='utf-8') as f:
-        text = f.read()
-    
-    # Convertir todo el texto en una lista de índices
-    data = torch.tensor(encode(text), dtype=torch.long)
-    
-    # Seleccionar un segmento aleatorio
-    file_size = len(data)
-    start_pos = random.randint(0, file_size - block_size * batch_size)
-
-    # Obtener la porción del texto
-    chunk = data[start_pos: start_pos + block_size * batch_size]
-    
-    return chunk
-
-
-def get_batch(split):
-    data = get_random_chunk(split)
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
-
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            _logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
 
 class Head(nn.Module):
     """ one head of self-attention """
@@ -96,7 +57,7 @@ class Head(nn.Module):
     def forward(self, x):
         # input of size (batch, time-step, channels)
         # output of size (batch, time-step, head size)
-        _B,T,_C = x.shape
+        B,T,C = x.shape
         k = self.key(x)   # (B,T,hs)
         q = self.query(x) # (B,T,hs)
         # compute attention scores ("affinities")
@@ -109,6 +70,9 @@ class Head(nn.Module):
         out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
         return out
 
+# [1, 0, 0]
+# [1, 0.6, 0]
+# [1, 0.6, 0.4]
 class MultiHeadAttention(nn.Module):
     """ multiple heads of self-attention in parallel """
 
@@ -204,9 +168,10 @@ class GPTLanguageModel(nn.Module):
     def generate(self, index, max_new_tokens):
         # index is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
-
+            # crop idx to the last block_size tokens
+            index_cond = index[:, -block_size:]
             # get the predictions
-            logits, _loss = self.forward(index)
+            logits, loss = self.forward(index_cond)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
             # apply softmax to get probabilities
@@ -217,34 +182,17 @@ class GPTLanguageModel(nn.Module):
             index = torch.cat((index, index_next), dim=1) # (B, T+1)
         return index
 
-model = GPTLanguageModel(vocab_size=vocab_size)
-m = model.to(device)
-
-
-# create a PyTorch optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-for iter in range(max_iters):
-    print(iter)
-    if iter % eval_iters == 0:
-        losses = estimate_loss()
-        print(f"step: {iter}, train loss: {losses['train']:.3f}, val loss: {losses['val']:.3f}")
-
-    # sample a batch of data
-    xb, yb = get_batch('train')
-
-    # evaluate the loss
-    logits, loss = model.forward(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-print(loss.item())
-
 model = GPTLanguageModel(vocab_size)
-
 print('loading model parameters...')
 with open('model-01.pkl', 'rb') as f:
     model = pickle.load(f)
 print('loaded successfully!')
 m = model.to(device)
 
+
+
+while True:
+    prompt = input("Prompt:\n")
+    context = torch.tensor(encode(prompt), dtype=torch.long, device=device)
+    generated_chars = decode(m.generate(context.unsqueeze(0), max_new_tokens=150)[0].tolist())
+    print(f'Completion:\n{generated_chars}')
